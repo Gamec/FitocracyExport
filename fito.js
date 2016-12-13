@@ -1,30 +1,44 @@
-var Nightmare = require('nightmare');
-var args = process.argv.slice(2);
+let Nightmare = require('nightmare');
+let fs = require('fs');
+let args = process.argv.slice(2);
+let workouts = [];
 
-var parsePage = function(userId) {
-  return function(nightmare) {
+let parsePage = function(userId, offset) {
+  Promise.resolve(
     nightmare
-      .goto('https://www.fitocracy.com/activity_stream/0/?user_id=' + userId)
+      .goto('https://www.fitocracy.com/activity_stream/' + offset + '/?user_id=' + userId)
       .inject('js', 'jquery.js')
-      .wait('.stream_item')
-      .screenshot('3.png')
       .evaluate(function() {
+        let workouts = [];
         let setsRegex = /(^\d+(.\d+)?) kg x (\d+) reps/
         let repsRegex = /(\d+) reps/
-        let workouts = [];
+        let titleRegex = /tracked (.*?) for/
         let streamItems = document.getElementsByClassName('stream_item');
         for (item of streamItems) {
-          let title = item.querySelector('.stream-type').textContent;
+          let title = titleRegex.exec(item.querySelector('.stream-type').textContent);
+          if (title) {
+            title = title[1];
+          } else {
+            continue;
+          }
+
           let date = item.querySelector('.action_time').textContent;
           let exercises = [];
 
           $(item).find('.action_detail li').each(function() {
             let title = $(this).find('.action_prompt').text();
+            let note = null;
+
             if (title) {
               let sets = [];
               let skip = false;
 
               $(this).find('ul > li').each(function() {
+                if ($(this).hasClass('stream_note')) {
+                  note = $(this).text().trim();
+                  return;
+                }
+
                 let set = setsRegex.exec($(this).text().trim());
                 if (set) {
                   sets.push({
@@ -40,7 +54,8 @@ var parsePage = function(userId) {
                     });
                   } else {
                     // That must be cardio or some other not important exercise
-                    skip = true;
+                    sets.push('ERR' + $(this).text().trim());
+                    //skip = true;
                   }
                 }
               });
@@ -49,7 +64,8 @@ var parsePage = function(userId) {
 
               exercises.push({
                 title: title,
-                sets: sets
+                sets: sets,
+                note: note
               });
             }
           });
@@ -63,10 +79,26 @@ var parsePage = function(userId) {
 
         return workouts;
       })
-  }
+  ).then(function(results) {
+    if (results.length > 0) {
+      workouts.push(results);
+      parsePage(userId, offset + 15);
+    } else {
+      nightmare.proc.disconnect();
+      nightmare.proc.kill();
+      nightmare.ended = true;
+
+      fs.writeFile('export.json', JSON.stringify(workouts), (err) => {
+        if(err) {
+          return console.log(err);
+        }
+        console.log('Export completed');
+      }); 
+    }
+  });
 }
 
-var nightmare = new Nightmare()
+let nightmare = new Nightmare({show: true})
   .useragent("Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/38.0.2125.111 Safari/537.36")
   .cookies.clearAll()
   .goto('https://www.fitocracy.com')
@@ -78,14 +110,7 @@ var nightmare = new Nightmare()
   .type('.login-details input[name=password]', args[1])
   .click('#login-modal-form button')
   .wait('#profile')
-  .screenshot('2.png')  
-  .use(parsePage(args[2]))
-  .then(function(workouts) {
-    for (workout of workouts) {
-      console.log(workout.title);
-      console.log(workout.date);
-      for (exercise of workout.exercises) {
-        console.log(exercise);
-      }
-    }
-  });
+  .screenshot('2.png');
+
+parsePage(args[2], 0);
+
